@@ -1,0 +1,257 @@
+<?php
+// Windows.php
+// Изисквания: PHP 7.2+ (препоръчително 7.4+), PDO_SQLITE достъпен
+
+session_start();
+
+// --- Настройки ---
+$dbFile = __DIR__ . '/users.db';
+$dsn = 'sqlite:' . $dbFile;
+
+// --- Инициализация на DB (създава таблица ако не съществува) ---
+try {
+    $pdo = new PDO($dsn, null, null, [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+    ]);
+    $pdo->exec("CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )");
+} catch (Exception $e) {
+    // Ако DB не може да се създаде/отвори, показваме грешка (можеш да логнеш по-подробно)
+    die("Database error: " . htmlspecialchars($e->getMessage()));
+}
+
+// --- CSRF Token (много прост) ---
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(20));
+}
+$csrf_token = $_SESSION['csrf_token'];
+
+// --- Обработване на POST заявки: регистрация, вход, изход ---
+$errors = [];
+$messages = [];
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $action = $_POST['action'] ?? '';
+
+    // Проверка на CSRF за опасни операции (регистрация и вход)
+    if (in_array($action, ['register', 'login']) && (!isset($_POST['csrf']) || $_POST['csrf'] !== $csrf_token)) {
+        $errors[] = "Невалиден CSRF токен. Зареди страницата отново и опитай пак.";
+    } else {
+        if ($action === 'register') {
+            // Регистрация
+            $username = trim($_POST['username'] ?? '');
+            $email = trim($_POST['email'] ?? '');
+            $password = $_POST['password'] ?? '';
+            $password_confirm = $_POST['password_confirm'] ?? '';
+
+            // Прости валидации
+            if ($username === '' || !preg_match('/^[\w\-\.]{3,30}$/u', $username)) {
+                $errors[] = "Потребителското име трябва да е 3-30 символа (букви, цифри, _ - .).";
+            }
+            if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                $errors[] = "Невалиден имейл адрес.";
+            }
+            if (strlen($password) < 6) {
+                $errors[] = "Паролата трябва да бъде поне 6 символа.";
+            }
+            if ($password !== $password_confirm) {
+                $errors[] = "Паролите не съвпадат.";
+            }
+
+            if (empty($errors)) {
+                // Вмъкване в базата
+                $hash = password_hash($password, PASSWORD_DEFAULT);
+                try {
+                    $stmt = $pdo->prepare("INSERT INTO users (username, email, password) VALUES (:u, :e, :p)");
+                    $stmt->execute([':u' => $username, ':e' => $email, ':p' => $hash]);
+                    $messages[] = "Успешна регистрация — вече можете да влезете.";
+                } catch (PDOException $ex) {
+                    if (strpos($ex->getMessage(), 'UNIQUE') !== false) {
+                        $errors[] = "Потребителско име или имейл вече съществуват.";
+                    } else {
+                        $errors[] = "Грешка при регистрацията: " . htmlspecialchars($ex->getMessage());
+                    }
+                }
+            }
+        } elseif ($action === 'login') {
+            // Вход
+            $usernameOrEmail = trim($_POST['username_or_email'] ?? '');
+            $password = $_POST['password'] ?? '';
+
+            if ($usernameOrEmail === '' || $password === '') {
+                $errors[] = "Моля въведете потребителско име/имейл и парола.";
+            } else {
+                // Намери потребител по username или email
+                $stmt = $pdo->prepare("SELECT id, username, email, password FROM users WHERE username = :u OR email = :u LIMIT 1");
+                $stmt->execute([':u' => $usernameOrEmail]);
+                $user = $stmt->fetch();
+                if ($user && password_verify($password, $user['password'])) {
+                    // Успешен вход
+                    session_regenerate_id(true);
+                    $_SESSION['user'] = [
+                        'id' => $user['id'],
+                        'username' => $user['username'],
+                        'email' => $user['email'],
+                    ];
+                    $messages[] = "Успешно влязохте като " . htmlspecialchars($user['username']) . ".";
+                } else {
+                    $errors[] = "Грешен потребител или парола.";
+                }
+            }
+        } elseif ($action === 'logout') {
+            // Изход
+            unset($_SESSION['user']);
+            session_regenerate_id(true);
+            $messages[] = "Успешно излязохте.";
+        }
+    }
+}
+
+// --- Демонстрационни дестинации (публични) ---
+// Може да ги замениш с динамично зареждане от база или API.
+$destinations = [
+    ['title' => 'София, България', 'summary' => 'Културна столица с богата история и планини наблизо.'],
+    ['title' => 'Пловдив, България', 'summary' => 'Старинен град с римски руини и оживена артистична сцена.'],
+    ['title' => 'Велико Търново, България', 'summary' => 'Старинна столица с крепост Царевец и панорамни гледки.'],
+    ['title' => 'Боровец', 'summary' => 'Ски курорт в Рила — зимни спортове и планинска природа.'],
+    ['title' => 'Слънчев бряг', 'summary' => 'Популярна морска дестинация с плажове и забавления.'],
+];
+
+$currentUser = $_SESSION['user'] ?? null;
+?>
+<!doctype html>
+<html lang="bg">
+<head>
+    <meta charset="utf-8">
+    <title>Дестинации — Windows.php</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <style>
+        :root { font-family: Arial, Helvetica, sans-serif; color:#222; background:#f5f7fb; }
+        body { margin:0; padding:0; }
+        header { background:#0b5; padding:18px 24px; color:#063; display:flex; align-items:center; justify-content:space-between; }
+        header h1 { margin:0; font-size:20px; color:#033; }
+        .wrap { max-width:1100px; margin:22px auto; padding:0 18px; }
+        .grid { display:grid; grid-template-columns: 1fr 360px; gap:18px; align-items:start; }
+        .card { background:white; border-radius:8px; padding:14px; box-shadow:0 6px 18px rgba(13,20,30,0.06); }
+        .dest-list { display:grid; gap:12px; }
+        .dest { padding:12px; border-left:4px solid #0b5; border-radius:6px; background:linear-gradient(180deg,#fff,#fbfffd); }
+        .dest h3 { margin:0 0 6px 0; font-size:16px; color:#064; }
+        .small { font-size:13px; color:#555; }
+        form input, form button { width:100%; padding:10px 12px; margin-bottom:8px; border:1px solid #ddd; border-radius:6px; box-sizing:border-box; }
+        form button { background:#0b5; color:white; border:0; cursor:pointer; }
+        form .btn-secondary { background:#2b6; color:#023; }
+        .messages { margin-bottom:12px; }
+        .error { background:#ffecec; color:#a00; padding:10px; border-radius:6px; margin-bottom:8px; }
+        .ok { background:#ecffe8; color:#064; padding:10px; border-radius:6px; margin-bottom:8px; }
+        nav .user { color:#033; }
+        .footer { text-align:center; margin:30px 0; color:#777; font-size:13px; }
+        @media (max-width:900px) {
+            .grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+<header>
+    <h1>Дестинации — видими за всички</h1>
+    <nav>
+        <?php if ($currentUser): ?>
+            <span class="user">Вие: <strong><?=htmlspecialchars($currentUser['username'])?></strong></span>
+            <form style="display:inline" method="post" action="">
+                <input type="hidden" name="action" value="logout">
+                <button style="margin-left:10px;" type="submit">Изход</button>
+            </form>
+        <?php else: ?>
+            <span class="user">Гост</span>
+        <?php endif; ?>
+    </nav>
+</header>
+
+<div class="wrap">
+    <div class="grid">
+        <main class="card">
+            <h2>Популярни дестинации</h2>
+            <p class="small">Тук виждате дестинациите без да е необходимо влизане.</p>
+
+            <div class="dest-list" style="margin-top:12px;">
+                <?php foreach ($destinations as $d): ?>
+                    <div class="dest">
+                        <h3><?=htmlspecialchars($d['title'])?></h3>
+                        <div class="small"><?=htmlspecialchars($d['summary'])?></div>
+                        <div style="margin-top:8px;">
+                            <!-- Примерен бутон за повече — може да иска логин в бъдеще -->
+                            <a href="#" style="text-decoration:none; color:#036;">Виж повече →</a>
+                        </div>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+        </main>
+
+        <aside class="card">
+            <?php if (!empty($errors)): ?>
+                <div class="messages">
+                    <?php foreach ($errors as $e): ?>
+                        <div class="error"><?=htmlspecialchars($e)?></div>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif; ?>
+
+            <?php if (!empty($messages)): ?>
+                <div class="messages">
+                    <?php foreach ($messages as $m): ?>
+                        <div class="ok"><?=htmlspecialchars($m)?></div>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif; ?>
+
+            <?php if (!$currentUser): ?>
+                <h3>Вход</h3>
+                <form method="post" action="">
+                    <input type="hidden" name="action" value="login">
+                    <input type="hidden" name="csrf" value="<?=htmlspecialchars($csrf_token)?>">
+                    <label class="small">Потребителско име или имейл</label>
+                    <input name="username_or_email" autocomplete="username" required>
+                    <label class="small">Парола</label>
+                    <input type="password" name="password" autocomplete="current-password" required>
+                    <button type="submit">Влез</button>
+                </form>
+
+                <hr style="margin:10px 0; border:none; border-top:1px dashed #eee;">
+
+                <h3>Регистрация</h3>
+                <form method="post" action="">
+                    <input type="hidden" name="action" value="register">
+                    <input type="hidden" name="csrf" value="<?=htmlspecialchars($csrf_token)?>">
+                    <label class="small">Потребителско име</label>
+                    <input name="username" pattern="[\w\-.]{3,30}" title="3-30 символа: букви, цифри, _ - ." required>
+                    <label class="small">Email</label>
+                    <input type="email" name="email" required>
+                    <label class="small">Парола</label>
+                    <input type="password" name="password" required>
+                    <label class="small">Повтори паролата</label>
+                    <input type="password" name="password_confirm" required>
+                    <button type="submit" class="btn-secondary">Регистрирай се</button>
+                </form>
+            <?php else: ?>
+                <h3>Профил</h3>
+                <p class="small">Потребител: <strong><?=htmlspecialchars($currentUser['username'])?></strong></p>
+                <p class="small">Email: <strong><?=htmlspecialchars($currentUser['email'])?></strong></p>
+                <form method="post" action="">
+                    <input type="hidden" name="action" value="logout">
+                    <button type="submit">Изход</button>
+                </form>
+            <?php endif; ?>
+        </aside>
+    </div>
+
+    <div class="footer card">
+        Windows.php — демонстрационна начална страница. За да използваш динамични дестинации, замени масива $destinations с извличане от база или API.
+    </div>
+</div>
+</body>
+</html>
